@@ -1,0 +1,13 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+models/
+logs/
+
+SkyblockFraudDetection/
