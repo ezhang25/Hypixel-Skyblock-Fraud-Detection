@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "files",
+			"path": "."
+		},
+		{
+			"name": "SBFD",
+			"path": "../../SBFD"
+		}
+	],
+	"settings": {}
+}

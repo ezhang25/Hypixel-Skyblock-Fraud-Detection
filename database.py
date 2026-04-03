@@ -32,6 +32,12 @@ AUCTION_METADATA_COLUMNS = {
     "decoded_dungeon_tier": "TEXT",
     "decoded_skin": "TEXT",
     "decoded_dye": "TEXT",
+    "decoded_pet_type": "TEXT",
+    "decoded_pet_tier": "TEXT",
+    "decoded_pet_level": "INTEGER",
+    "decoded_pet_exp": "REAL",
+    "decoded_pet_held_item": "TEXT",
+    "decoded_pet_candy_used": "INTEGER",
 }
 
 
@@ -68,6 +74,12 @@ CREATE TABLE IF NOT EXISTS auctions (
     decoded_dungeon_tier TEXT,
     decoded_skin TEXT,
     decoded_dye TEXT,
+    decoded_pet_type TEXT,
+    decoded_pet_tier TEXT,
+    decoded_pet_level INTEGER,
+    decoded_pet_exp REAL,
+    decoded_pet_held_item TEXT,
+    decoded_pet_candy_used INTEGER,
     ingested_at     INTEGER NOT NULL,      -- when we stored it
     source          TEXT DEFAULT 'ended'   -- 'ended' | 'live'
 );
@@ -166,7 +178,9 @@ def insert_auctions(rows: list[dict]) -> int:
              decoded_hot_potato_count, decoded_fuming_potato_count, decoded_reforge,
              decoded_enchant_count, decoded_enchant_summary, decoded_rune_summary,
              decoded_gemstone_summary, decoded_attribute_summary, decoded_dungeon_tier,
-             decoded_skin, decoded_dye, ingested_at, source)
+             decoded_skin, decoded_dye, decoded_pet_type, decoded_pet_tier,
+             decoded_pet_level, decoded_pet_exp, decoded_pet_held_item,
+             decoded_pet_candy_used, ingested_at, source)
         VALUES
             (:auction_id, :item_name, :item_id, :tier, :category,
              :seller_uuid, :buyer_uuid, :start_price, :final_price,
@@ -176,7 +190,9 @@ def insert_auctions(rows: list[dict]) -> int:
              :decoded_hot_potato_count, :decoded_fuming_potato_count, :decoded_reforge,
              :decoded_enchant_count, :decoded_enchant_summary, :decoded_rune_summary,
              :decoded_gemstone_summary, :decoded_attribute_summary, :decoded_dungeon_tier,
-             :decoded_skin, :decoded_dye, :ingested_at, :source)
+             :decoded_skin, :decoded_dye, :decoded_pet_type, :decoded_pet_tier,
+             :decoded_pet_level, :decoded_pet_exp, :decoded_pet_held_item,
+             :decoded_pet_candy_used, :ingested_at, :source)
     """
     with get_conn() as conn:
         cursor = conn.executemany(sql, prepared_rows)
@@ -197,9 +213,12 @@ def get_item_price_history(
     cutoff_ms = int((__import__("time").time() - days * 86400) * 1000)
     source_sql, source_params = _source_clause(allowed_sources)
     sql = """
-        SELECT auction_id, final_price, ended_at, bid_count, is_bin, source,
-               item_id, decoded_item_id, decoded_stars, decoded_recombobulated,
-               decoded_enchant_count, decoded_reforge
+        SELECT auction_id, item_name, tier, final_price, ended_at, bid_count, is_bin, source,
+               item_id, decoded_item_id, decoded_clean_name, decoded_item_json,
+               decoded_stars, decoded_recombobulated, decoded_enchant_count,
+               decoded_reforge, decoded_pet_type, decoded_pet_tier,
+               decoded_pet_level, decoded_pet_exp, decoded_pet_held_item,
+               decoded_pet_candy_used
         FROM auctions
         WHERE item_id = ? AND ended_at >= ? AND source IN
     """ + source_sql + """
@@ -246,17 +265,49 @@ def get_pair_frequency(seller_uuid: str, buyer_uuid: str, days: int = 30) -> int
 
 
 def insert_flag(record: dict) -> None:
-    """Insert or replace a flagged auction record."""
-    sql = """
-        INSERT OR REPLACE INTO flagged
-            (auction_id, flagged_at, model_version, anomaly_score,
-             fraud_prob, tier, reasons, reviewed)
-        VALUES
-            (:auction_id, :flagged_at, :model_version, :anomaly_score,
-             :fraud_prob, :tier, :reasons, FALSE)
+    """Insert or update a flagged auction record unless it was labeled normal."""
+    with get_conn() as conn:
+        existing_label = conn.execute(
+            "SELECT label FROM labels WHERE auction_id = ?",
+            (record["auction_id"],),
+        ).fetchone()
+        if existing_label is not None and existing_label[0] == 0:
+            logger.info(
+                "Skipping flag insert for %s because it is labeled false positive",
+                record["auction_id"],
+            )
+            return
+
+        existing_flag = conn.execute(
+            "SELECT reviewed FROM flagged WHERE auction_id = ? AND model_version = ?",
+            (record["auction_id"], record["model_version"]),
+        ).fetchone()
+        reviewed = bool(existing_flag[0]) if existing_flag is not None else False
+
+        sql = """
+            INSERT OR REPLACE INTO flagged
+                (auction_id, flagged_at, model_version, anomaly_score,
+                 fraud_prob, tier, reasons, reviewed)
+            VALUES
+                (:auction_id, :flagged_at, :model_version, :anomaly_score,
+                 :fraud_prob, :tier, :reasons, :reviewed)
+        """
+        payload = dict(record)
+        payload["reviewed"] = reviewed
+        conn.execute(sql, payload)
+
+
+def reset_flagged_queue() -> int:
+    """
+    Clear the current flagged queue while preserving labels.
+    Useful before a full rescore after retraining so dashboard stats reflect
+    the latest model rather than a mix of old and new flag sets.
     """
     with get_conn() as conn:
-        conn.execute(sql, record)
+        conn.execute("DELETE FROM flagged")
+        removed = conn.execute("SELECT changes()").fetchone()[0]
+    logger.info("Reset flagged queue, removed %s existing flagged rows", removed)
+    return removed
 
 
 def get_unreviewed_flags(tier: str | None = None, limit: int = 50) -> list[dict]:
@@ -274,7 +325,10 @@ def get_unreviewed_flags(tier: str | None = None, limit: int = 50) -> list[dict]
                a.seller_uuid, a.buyer_uuid, a.bid_count, a.is_bin,
                a.decoded_clean_name, a.decoded_stars, a.decoded_reforge,
                a.decoded_enchant_summary, a.decoded_rune_summary,
-               a.decoded_gemstone_summary, a.decoded_attribute_summary
+               a.decoded_gemstone_summary, a.decoded_attribute_summary,
+               a.decoded_item_json, a.decoded_pet_type, a.decoded_pet_tier,
+               a.decoded_pet_level, a.decoded_pet_held_item,
+               a.decoded_pet_candy_used
         FROM flagged f
         JOIN auctions a ON f.auction_id = a.auction_id
         {where}
@@ -295,7 +349,10 @@ def label_auction(auction_id: str, label: int, notes: str = "") -> None:
     """
     with get_conn() as conn:
         conn.execute(sql, (auction_id, label, int(time.time() * 1000), notes))
-        conn.execute("UPDATE flagged SET reviewed = TRUE WHERE auction_id = ?", (auction_id,))
+        if label == 0:
+            conn.execute("DELETE FROM flagged WHERE auction_id = ?", (auction_id,))
+        else:
+            conn.execute("UPDATE flagged SET reviewed = TRUE WHERE auction_id = ?", (auction_id,))
     logger.info(f"Labelled {auction_id} as {'IRL TRADE' if label else 'false positive'}")
 
 

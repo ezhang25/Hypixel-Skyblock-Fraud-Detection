@@ -88,11 +88,11 @@ MIN_SALES_FOR_MEDIAN    = 5
 
 # ── Anomaly detection thresholds ──────────────────────────────────────────────
 # Price must be at least this many times the median to flag as suspicious
-PRICE_RATIO_HARD_FLOOR  = 3.0
+PRICE_RATIO_HARD_FLOOR  = 5.0
 
 # Isolation Forest contamination — expected fraction of outliers in training data.
 # Start conservative (1-2%), adjust after reviewing flagged cases.
-ISOLATION_FOREST_CONTAMINATION = 0.02
+ISOLATION_FOREST_CONTAMINATION = 0.01
 
 # LightGBM threshold — probability above which we flag (0-1).
 # Lower = more flags (more false positives), higher = fewer flags (more misses).
@@ -101,9 +101,9 @@ LGBM_FLAG_THRESHOLD     = 0.6
 # ── Alert tiers ───────────────────────────────────────────────────────────────
 # Auctions are tiered by how suspicious they look.
 TIER_THRESHOLDS = {
-    "HIGH":   0.85,   # Very likely IRL trade — review immediately
-    "MEDIUM": 0.65,   # Suspicious — review when possible
-    "LOW":    0.45,   # Borderline — log for pattern analysis
+    "HIGH":   0.95,   # Very likely IRL trade — review immediately
+    "MEDIUM": 0.80,   # Suspicious — review when possible
+    "LOW":    0.65,   # Borderline — log for pattern analysis
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────

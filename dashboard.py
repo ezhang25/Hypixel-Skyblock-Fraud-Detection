@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 from datetime import datetime
 
 import config
@@ -41,6 +42,7 @@ BOLD   = "\033[1m"
 DIM    = "\033[2m"
 GREEN  = "\033[92m"
 RED    = "\033[91m"
+PET_LEVEL_RE = re.compile(r"\[Lvl\s+(\d+)\]", re.IGNORECASE)
 
 
 def _fmt_coins(n: int) -> str:
@@ -56,6 +58,48 @@ def _fmt_coins(n: int) -> str:
 
 def _fmt_ts(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _decode_item_json(flag: dict) -> dict:
+    blob = flag.get("decoded_item_json")
+    if not isinstance(blob, str) or not blob:
+        return {}
+    try:
+        value = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _pet_summary(flag: dict) -> dict:
+    pet = {
+        "pet_type": flag.get("decoded_pet_type"),
+        "pet_tier": flag.get("decoded_pet_tier"),
+        "pet_level": flag.get("decoded_pet_level"),
+        "pet_held_item": flag.get("decoded_pet_held_item"),
+        "pet_candy_used": flag.get("decoded_pet_candy_used"),
+    }
+
+    decoded_item = _decode_item_json(flag)
+    decoded_pet = decoded_item.get("pet")
+    if isinstance(decoded_pet, dict):
+        for key in pet:
+            if pet[key] is None and decoded_pet.get(key) is not None:
+                pet[key] = decoded_pet.get(key)
+
+    if pet["pet_level"] is None:
+        clean_name = flag.get("decoded_clean_name") or flag.get("item_name") or ""
+        match = PET_LEVEL_RE.search(clean_name)
+        if match:
+            pet["pet_level"] = int(match.group(1))
+
+    return pet
+
+
+def _format_pet_type(pet_type: str | None, fallback_name: str) -> str:
+    if not pet_type:
+        return fallback_name
+    return pet_type.replace("_", " ").title()
 
 
 def print_stats() -> None:
@@ -84,6 +128,8 @@ def print_flag(flag: dict, index: int, total: int) -> None:
     tier    = flag["tier"]
     color   = TIER_COLORS.get(tier, "")
     reasons = json.loads(flag.get("reasons", "[]"))
+    pet = _pet_summary(flag)
+    is_pet = flag.get("item_id") == "PET" or bool(pet.get("pet_type"))
 
     print(f"\n{BOLD}──────────────────────────────────────────────────────{RESET}")
     print(f"  {BOLD}[{index}/{total}]{RESET}  Auction: {DIM}{flag['auction_id']}{RESET}")
@@ -93,6 +139,19 @@ def print_flag(flag: dict, index: int, total: int) -> None:
     print(f"  {BOLD}Item:{RESET}    {flag['item_name']}")
     if flag.get("decoded_clean_name") and flag["decoded_clean_name"] != flag["item_name"]:
         print(f"  {BOLD}Decoded:{RESET} {flag['decoded_clean_name']}")
+    if is_pet:
+        pet_bits = []
+        pet_tier = pet.get("pet_tier") or flag.get("tier")
+        pet_name = _format_pet_type(pet.get("pet_type"), flag.get("decoded_clean_name") or flag["item_name"])
+        pet_label = f"{pet_tier} {pet_name}".strip() if pet_tier else pet_name
+        if pet.get("pet_level") is not None:
+            pet_label += f" (Lvl {int(pet['pet_level'])})"
+        pet_bits.append(pet_label)
+        if pet.get("pet_held_item"):
+            pet_bits.append(f"Held item: {pet['pet_held_item']}")
+        if pet.get("pet_candy_used") is not None:
+            pet_bits.append(f"Candy used: {int(pet['pet_candy_used'])}")
+        print(f"  {BOLD}Pet:{RESET}     " + " | ".join(pet_bits))
     print(f"  {BOLD}Price:{RESET}   {_fmt_coins(flag['final_price'])} coins")
     detail_bits = []
     if flag.get("decoded_reforge"):

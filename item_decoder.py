@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import gzip
 import io
+import json
 import re
 from typing import Any
 
@@ -103,6 +104,40 @@ def _extract_potato_counts(extra: dict[str, Any]) -> tuple[int | None, int | Non
     return min(total, 10), max(total - 10, 0)
 
 
+def _extract_pet_data(extra: dict[str, Any]) -> dict[str, Any] | None:
+    raw_pet_info = extra.get("petInfo")
+    if not isinstance(raw_pet_info, str) or not raw_pet_info:
+        return None
+
+    try:
+        pet_info = json.loads(raw_pet_info)
+    except json.JSONDecodeError:
+        return None
+
+    level_data = pet_info.get("level")
+    pet_level = None
+    if isinstance(level_data, dict) and isinstance(level_data.get("level"), (int, float)):
+        pet_level = int(level_data["level"])
+    elif isinstance(pet_info.get("level"), (int, float)):
+        pet_level = int(pet_info["level"])
+
+    pet_exp = pet_info.get("exp")
+    pet_exp = float(pet_exp) if isinstance(pet_exp, (int, float)) else None
+
+    candy_used = pet_info.get("candyUsed")
+    candy_used = int(candy_used) if isinstance(candy_used, (int, float)) else None
+
+    return {
+        "pet_type": pet_info.get("type") if isinstance(pet_info.get("type"), str) else None,
+        "pet_tier": pet_info.get("tier") if isinstance(pet_info.get("tier"), str) else None,
+        "pet_level": pet_level,
+        "pet_exp": pet_exp,
+        "pet_held_item": pet_info.get("heldItem") if isinstance(pet_info.get("heldItem"), str) else None,
+        "pet_candy_used": candy_used,
+        "pet_skin": pet_info.get("skin") if isinstance(pet_info.get("skin"), str) else None,
+    }
+
+
 def decode_item_bytes(item_bytes_field: Any) -> tuple[dict[str, Any] | None, str | None]:
     encoded = extract_item_bytes_data(item_bytes_field)
     if not encoded:
@@ -127,6 +162,7 @@ def decode_item_bytes(item_bytes_field: Any) -> tuple[dict[str, Any] | None, str
         gemstones = _extract_gemstone_data(extra)
         attributes = _extract_attribute_data(extra)
         hot_potato_count, fuming_potato_count = _extract_potato_counts(extra)
+        pet_data = _extract_pet_data(extra)
 
         display_name = display.get("Name")
         clean_name = strip_minecraft_formatting(display_name)
@@ -163,6 +199,7 @@ def decode_item_bytes(item_bytes_field: Any) -> tuple[dict[str, Any] | None, str
                 else extra.get("dye") if isinstance(extra.get("dye"), str) else None
             ),
             "item_uuid": extra.get("uuid") if isinstance(extra.get("uuid"), str) else None,
+            "pet": pet_data,
             "extra_attributes": extra or None,
         }
 

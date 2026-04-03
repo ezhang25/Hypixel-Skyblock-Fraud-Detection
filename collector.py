@@ -85,8 +85,15 @@ def _metadata_columns(decoded_item: dict | None) -> dict:
             "decoded_dungeon_tier": None,
             "decoded_skin": None,
             "decoded_dye": None,
+            "decoded_pet_type": None,
+            "decoded_pet_tier": None,
+            "decoded_pet_level": None,
+            "decoded_pet_exp": None,
+            "decoded_pet_held_item": None,
+            "decoded_pet_candy_used": None,
         }
 
+    pet = decoded_item.get("pet") or {}
     return {
         "decoded_item_json": json.dumps(decoded_item, sort_keys=True),
         "decoded_item_id": decoded_item.get("item_id"),
@@ -104,6 +111,12 @@ def _metadata_columns(decoded_item: dict | None) -> dict:
         "decoded_dungeon_tier": decoded_item.get("dungeon_tier"),
         "decoded_skin": decoded_item.get("skin"),
         "decoded_dye": decoded_item.get("dye"),
+        "decoded_pet_type": pet.get("pet_type"),
+        "decoded_pet_tier": pet.get("pet_tier"),
+        "decoded_pet_level": pet.get("pet_level"),
+        "decoded_pet_exp": pet.get("pet_exp"),
+        "decoded_pet_held_item": pet.get("pet_held_item"),
+        "decoded_pet_candy_used": pet.get("pet_candy_used"),
     }
 
 

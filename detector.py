@@ -36,7 +36,14 @@ from config import (
     TIER_THRESHOLDS,
     LOG_DIR,
 )
-from database import init_db, insert_auctions, insert_flag, get_conn, db_stats
+from database import (
+    init_db,
+    insert_auctions,
+    insert_flag,
+    get_conn,
+    db_stats,
+    reset_flagged_queue,
+)
 from collector import fetch_ended_auctions, _normalise_ended
 from features import compute_features_single, FEATURE_COLUMNS
 
@@ -63,6 +70,66 @@ if not LGBM_AVAILABLE:
 
 def _model_path(name: str):
     return config.get_model_paths()[name]
+
+
+def _decode_item_json(auction: dict) -> dict:
+    blob = auction.get("decoded_item_json")
+    if not isinstance(blob, str) or not blob:
+        return {}
+    try:
+        value = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _has_pet_skin(auction: dict) -> bool:
+    decoded = _decode_item_json(auction)
+    pet = decoded.get("pet")
+    return isinstance(pet, dict) and isinstance(pet.get("pet_skin"), str) and bool(pet["pet_skin"])
+
+
+def _should_skip_for_sparse_comparables(auction: dict, features: dict) -> tuple[bool, str | None]:
+    is_pet = features.get("is_pet") == 1.0
+    has_skin = bool(auction.get("decoded_skin")) or _has_pet_skin(auction)
+    has_quality_median = features.get("has_quality_median") == 1.0
+
+    if is_pet and not has_quality_median:
+        return True, "pet has no reliable comparable sales yet"
+
+    if has_skin and not has_quality_median:
+        return True, "skinned item has no reliable comparable sales yet"
+
+    if features.get("has_item_median") != 1.0 and not has_quality_median:
+        return True, "item has no reliable comparable sales yet"
+
+    return False, None
+
+
+def _passes_strict_evidence_gate(features: dict, scores: dict) -> tuple[bool, str | None]:
+    pqmr = features.get("price_to_quality_median_ratio", 1.0)
+    pmr = features.get("price_to_median_ratio", 1.0)
+    has_quality = features.get("has_quality_median") == 1.0
+    has_item = features.get("has_item_median") == 1.0
+    repeat_pair = features.get("repeat_pair") == 1.0
+    very_fast = features.get("very_fast_sale") == 1.0
+    seller_outlier = features.get("price_to_seller_avg_ratio", 1.0) >= 8.0
+    anomaly_score = scores.get("anomaly_score") or 0.0
+    fraud_prob = scores.get("fraud_prob")
+
+    if has_quality and pqmr >= 3.0:
+        return True, None
+
+    if has_item and pmr >= 8.0 and (very_fast or repeat_pair or seller_outlier):
+        return True, None
+
+    if fraud_prob is not None and fraud_prob >= 0.90 and has_item and pmr >= PRICE_RATIO_HARD_FLOOR:
+        return True, None
+
+    if anomaly_score >= 0.98 and has_quality and pqmr >= 2.0 and repeat_pair:
+        return True, None
+
+    return False, "insufficient pricing evidence for a tight fraud flag"
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -203,9 +270,6 @@ def _build_reasons(features: dict, scores: dict) -> list[str]:
     if plbin > 2:
         reasons.append(f"Price is {plbin:.1f}× the lowest BIN at time of sale")
 
-    if features.get("bin_zero_bid") == 1.0:
-        reasons.append("BIN listing with zero competing bids")
-
     if features.get("very_fast_sale") == 1.0:
         ts = features.get("time_to_sell_s", 0)
         reasons.append(f"Sold in {ts:.0f}s (< 2 minutes)")
@@ -248,10 +312,28 @@ def score_auction(auction: dict, bundle: ModelBundle) -> dict | None:
     if 0 < pmr < PRICE_RATIO_HARD_FLOOR:
         return None
 
+    skip_sparse, skip_reason = _should_skip_for_sparse_comparables(auction, features)
+    if skip_sparse:
+        logger.debug(
+            "Skipping %s because %s",
+            auction.get("auction_id"),
+            skip_reason,
+        )
+        return None
+
     scores   = bundle.score(features)
     combined = scores.get("combined_score")
 
     if combined is None:
+        return None
+
+    passes_gate, gate_reason = _passes_strict_evidence_gate(features, scores)
+    if not passes_gate:
+        logger.debug(
+            "Skipping %s because %s",
+            auction.get("auction_id"),
+            gate_reason,
+        )
         return None
 
     tier = _assign_tier(combined)
@@ -278,6 +360,8 @@ def score_all_existing(bundle: ModelBundle) -> None:
     with get_conn() as conn:
         rows = [dict(r) for r in conn.execute("SELECT * FROM auctions").fetchall()]
 
+    cleared = reset_flagged_queue()
+    logger.info("Cleared %s stale flagged rows before full rescore", cleared)
     logger.info(f"Scoring {len(rows)} existing auctions...")
     flagged = 0
     for auction in rows:

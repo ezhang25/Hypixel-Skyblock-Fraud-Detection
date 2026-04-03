@@ -12,7 +12,9 @@ Feature groups:
   5. Item context        — rarity tier, category normalisation
 """
 
+import json
 import logging
+import re
 from statistics import median, stdev
 
 from runtime import log_runtime_environment
@@ -35,6 +37,8 @@ from database import (
 )
 
 logger = logging.getLogger(__name__)
+PET_LEVEL_RE = re.compile(r"\[Lvl\s+(\d+)\]")
+PET_MIN_SALES_FOR_MEDIAN = 2
 
 # Rarity tier weights — rarer items legitimately sell for more variance
 TIER_MULTIPLIER = {
@@ -59,6 +63,11 @@ def _safe_stdev(values: list[float]) -> float | None:
     return float(stdev(values)) if len(values) >= 2 else None
 
 
+def _safe_quality_median(values: list[float], is_pet: bool) -> float | None:
+    min_sales = PET_MIN_SALES_FOR_MEDIAN if is_pet else MIN_SALES_FOR_MEDIAN
+    return float(median(values)) if len(values) >= min_sales else None
+
+
 def _history_sources_for_auction(auction: dict) -> tuple[str, ...]:
     source = auction.get("source", "ended")
     if source == "demo":
@@ -67,8 +76,21 @@ def _history_sources_for_auction(auction: dict) -> tuple[str, ...]:
 
 
 def _quality_signature(auction: dict) -> tuple:
+    item_key = auction.get("item_id") or auction.get("decoded_item_id") or auction.get("item_name")
+    pet = _pet_metadata(auction)
+    if item_key == "PET" or pet.get("pet_type"):
+        pet_level = int(pet.get("pet_level") or 0)
+        pet_level_bucket = min((pet_level // 10) * 10, 100)
+        return (
+            "PET",
+            pet.get("pet_type") or "UNKNOWN",
+            pet.get("pet_tier") or auction.get("tier") or "UNKNOWN",
+            pet_level_bucket,
+            (pet.get("pet_held_item") or "").strip().lower(),
+        )
+
     return (
-        auction.get("item_id") or auction.get("decoded_item_id") or auction.get("item_name"),
+        item_key,
         int(auction.get("decoded_stars") or 0),
         1 if auction.get("decoded_recombobulated") else 0,
         int(auction.get("decoded_enchant_count") or 0),
@@ -80,6 +102,71 @@ def _matches_quality_signature(candidate: dict, signature: tuple) -> bool:
     return _quality_signature(candidate) == signature
 
 
+def _pet_quality_matches(history: list[dict], auction: dict, auction_id: str) -> list[dict]:
+    pet = _pet_metadata(auction)
+    pet_type = pet.get("pet_type") or "UNKNOWN"
+    pet_tier = pet.get("pet_tier") or auction.get("tier") or "UNKNOWN"
+    pet_level = int(pet.get("pet_level") or 0)
+    pet_level_bucket = min((pet_level // 10) * 10, 100)
+
+    exact_signature = _quality_signature(auction)
+    exact_matches = [
+        h for h in history
+        if h["auction_id"] != auction_id and _matches_quality_signature(h, exact_signature)
+    ]
+    if exact_matches:
+        return exact_matches
+
+    tier_bucket_matches = []
+    for candidate in history:
+        if candidate["auction_id"] == auction_id:
+            continue
+        candidate_pet = _pet_metadata(candidate)
+        candidate_level = int(candidate_pet.get("pet_level") or 0)
+        candidate_level_bucket = min((candidate_level // 10) * 10, 100)
+        if (
+            (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
+            and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
+            and candidate_level_bucket == pet_level_bucket
+        ):
+            tier_bucket_matches.append(candidate)
+    if tier_bucket_matches:
+        return tier_bucket_matches
+
+    if pet_level >= 90:
+        high_level_matches = []
+        for candidate in history:
+            if candidate["auction_id"] == auction_id:
+                continue
+            candidate_pet = _pet_metadata(candidate)
+            candidate_level = int(candidate_pet.get("pet_level") or 0)
+            if (
+                (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
+                and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
+                and candidate_level >= 90
+            ):
+                high_level_matches.append(candidate)
+        if high_level_matches:
+            return high_level_matches
+
+    nearby_level_matches = []
+    for candidate in history:
+        if candidate["auction_id"] == auction_id:
+            continue
+        candidate_pet = _pet_metadata(candidate)
+        candidate_level = int(candidate_pet.get("pet_level") or 0)
+        if (
+            (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
+            and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
+            and abs(candidate_level - pet_level) <= 10
+        ):
+            nearby_level_matches.append(candidate)
+    if nearby_level_matches:
+        return nearby_level_matches
+
+    return []
+
+
 def _safe_numeric(value, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -89,7 +176,70 @@ def _safe_numeric(value, default: float = 0.0) -> float:
         return default
 
 
+def _decode_item_json(auction: dict) -> dict:
+    blob = auction.get("decoded_item_json")
+    if not isinstance(blob, str) or not blob:
+        return {}
+    try:
+        value = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _pet_metadata(auction: dict) -> dict:
+    pet = {
+        "pet_type": auction.get("decoded_pet_type"),
+        "pet_tier": auction.get("decoded_pet_tier"),
+        "pet_level": auction.get("decoded_pet_level"),
+        "pet_exp": auction.get("decoded_pet_exp"),
+        "pet_held_item": auction.get("decoded_pet_held_item"),
+        "pet_candy_used": auction.get("decoded_pet_candy_used"),
+    }
+
+    decoded_item = _decode_item_json(auction)
+    decoded_pet = decoded_item.get("pet")
+    if isinstance(decoded_pet, dict):
+        for key in pet:
+            if pet[key] is None and decoded_pet.get(key) is not None:
+                pet[key] = decoded_pet.get(key)
+
+    extra = decoded_item.get("extra_attributes")
+    if isinstance(extra, dict):
+        raw_pet_info = extra.get("petInfo")
+        if isinstance(raw_pet_info, str):
+            try:
+                pet_info = json.loads(raw_pet_info)
+            except json.JSONDecodeError:
+                pet_info = {}
+            if pet["pet_type"] is None:
+                pet["pet_type"] = pet_info.get("type")
+            if pet["pet_tier"] is None:
+                pet["pet_tier"] = pet_info.get("tier")
+            if pet["pet_held_item"] is None:
+                pet["pet_held_item"] = pet_info.get("heldItem")
+            if pet["pet_candy_used"] is None and isinstance(pet_info.get("candyUsed"), (int, float)):
+                pet["pet_candy_used"] = int(pet_info["candyUsed"])
+            if pet["pet_exp"] is None and isinstance(pet_info.get("exp"), (int, float)):
+                pet["pet_exp"] = float(pet_info["exp"])
+            if pet["pet_level"] is None:
+                level_data = pet_info.get("level")
+                if isinstance(level_data, dict) and isinstance(level_data.get("level"), (int, float)):
+                    pet["pet_level"] = int(level_data["level"])
+                elif isinstance(pet_info.get("level"), (int, float)):
+                    pet["pet_level"] = int(pet_info["level"])
+
+    if pet["pet_level"] is None:
+        clean_name = auction.get("decoded_clean_name") or auction.get("item_name") or ""
+        match = PET_LEVEL_RE.search(clean_name)
+        if match:
+            pet["pet_level"] = int(match.group(1))
+
+    return pet
+
+
 def _decoded_item_quality_features(auction: dict) -> dict[str, float]:
+    pet = _pet_metadata(auction)
     stars = _safe_numeric(auction.get("decoded_stars"))
     enchants = _safe_numeric(auction.get("decoded_enchant_count"))
     recombobulated = 1.0 if auction.get("decoded_recombobulated") else 0.0
@@ -100,6 +250,12 @@ def _decoded_item_quality_features(auction: dict) -> dict[str, float]:
     has_gemstones = 1.0 if auction.get("decoded_gemstone_summary") else 0.0
     has_attributes = 1.0 if auction.get("decoded_attribute_summary") else 0.0
     has_decoded_item = 1.0 if auction.get("decoded_item_id") else 0.0
+    pet_level = _safe_numeric(pet.get("pet_level"))
+    pet_exp = _safe_numeric(pet.get("pet_exp"))
+    has_pet_held_item = 1.0 if pet.get("pet_held_item") else 0.0
+    pet_candy_used = _safe_numeric(pet.get("pet_candy_used"))
+    is_pet = 1.0 if (auction.get("item_id") == "PET" or pet.get("pet_type")) else 0.0
+    is_max_level_pet = 1.0 if pet_level >= 100 else 0.0
 
     quality_score = (
         0.20 * recombobulated
@@ -111,6 +267,8 @@ def _decoded_item_quality_features(auction: dict) -> dict[str, float]:
         + 0.05 * has_runes
         + 0.05 * has_gemstones
         + 0.04 * has_attributes
+        + 0.10 * min(pet_level / 100.0, 1.0)
+        + 0.05 * has_pet_held_item
     )
 
     return {
@@ -124,6 +282,12 @@ def _decoded_item_quality_features(auction: dict) -> dict[str, float]:
         "decoded_has_runes": has_runes,
         "decoded_has_gemstones": has_gemstones,
         "decoded_has_attributes": has_attributes,
+        "is_pet": is_pet,
+        "decoded_pet_level": pet_level,
+        "decoded_pet_exp": pet_exp,
+        "decoded_has_pet_held_item": has_pet_held_item,
+        "decoded_pet_candy_used": pet_candy_used,
+        "decoded_is_max_level_pet": is_max_level_pet,
         "item_quality_score": quality_score,
     }
 
@@ -151,13 +315,19 @@ def compute_features_single(auction: dict) -> dict:
         if item_id else []
     )
     prices  = [h["final_price"] for h in history if h["auction_id"] != auction_id]
-    quality_signature = _quality_signature(auction)
-    quality_history = [h for h in history if h["auction_id"] != auction_id and _matches_quality_signature(h, quality_signature)]
+    if features["is_pet"] == 1.0:
+        quality_history = _pet_quality_matches(history, auction, auction_id)
+    else:
+        quality_signature = _quality_signature(auction)
+        quality_history = [
+            h for h in history
+            if h["auction_id"] != auction_id and _matches_quality_signature(h, quality_signature)
+        ]
     quality_prices = [h["final_price"] for h in quality_history]
 
     item_median   = _safe_median(prices)
     item_stdev    = _safe_stdev(prices)
-    quality_median = _safe_median(quality_prices)
+    quality_median = _safe_quality_median(quality_prices, features["is_pet"] == 1.0)
     quality_stdev = _safe_stdev(quality_prices)
 
     features["quality_match_count"] = float(len(quality_prices))
@@ -208,7 +378,7 @@ def compute_features_single(auction: dict) -> dict:
     # Zero bids on a non-BIN expensive auction is suspicious
     features["zero_bids"]      = 1.0 if bid_count == 0 else 0.0
 
-    # BIN + zero competing bids + high price = classic IRL pattern
+    # Keep as a neutral mechanic for compatibility with older models.
     features["bin_zero_bid"]   = float(is_bin and bid_count == 0)
 
     if time_to_sell is not None and time_to_sell >= 0:
@@ -289,9 +459,6 @@ def _heuristic_score(f: dict) -> float:
     if pmr > 0:
         add(0.35, pmr > 10)
         add(0.15, 3 < pmr <= 10)
-
-    # BIN + zero bids
-    add(0.20, f.get("bin_zero_bid", 0) == 1)
 
     # Very fast sale
     add(0.10, f.get("very_fast_sale", 0) == 1)
@@ -389,6 +556,12 @@ FEATURE_COLUMNS = [
     "decoded_has_runes",
     "decoded_has_gemstones",
     "decoded_has_attributes",
+    "is_pet",
+    "decoded_pet_level",
+    "decoded_pet_exp",
+    "decoded_has_pet_held_item",
+    "decoded_pet_candy_used",
+    "decoded_is_max_level_pet",
     "item_quality_score",
     "log_final_price",
     "heuristic_score",

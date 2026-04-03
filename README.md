@@ -19,63 +19,112 @@ skyblock_irl_detector/
 └── logs/                  # Ingestion and detection logs
 ```
 
-## Quick Start
+## Setup
 
 ```bash
-# 1. Install dependencies into the project virtualenv
 ./.venv/bin/python -m pip install -r requirements.txt
+```
 
-# 2. Collect real Hypixel auction data
+Run the project with `./.venv/bin/python` so the installed dependencies match the interpreter.
+
+## Real Data Workflow
+
+### Fresh real run
+
+```bash
+# 1. Collect ended auctions into the real DB
 ./.venv/bin/python collector.py --mode backfill --pages 100
 
-# 3. Train the baseline anomaly detector on the real DB
+# 2. Train or retrain the real Isolation Forest model
 ./.venv/bin/python train.py --stage isolation
 
-# 4. Start the live detector against the real DB/models
-./.venv/bin/python detector.py --live
+# 3. Score all auctions currently in the real DB
+./.venv/bin/python detector.py --score-all
 
-# 5. Review flagged auctions from the real DB
+# 4. Review results
+./.venv/bin/python dashboard.py --stats
 ./.venv/bin/python dashboard.py
 ```
 
-## Notes
+### Continuous ended-auction collection
 
-- Run the project with `./.venv/bin/python` so the installed dependencies match the interpreter.
-- `train.py --stage isolation` and `detector.py` work without LightGBM.
+```bash
+# Poll Hypixel ended auctions every 60 seconds and keep inserting new rows
+./.venv/bin/python collector.py --mode live
+```
+
+Recommended workflow:
+- leave `collector.py --mode live` running in one terminal
+- retrain manually when you have enough new data:
+
+```bash
+./.venv/bin/python train.py --stage isolation
+```
+
+- then rescore the DB with the latest model:
+
+```bash
+./.venv/bin/python detector.py --score-all
+```
+
+### Continuous live detection
+
+After a model has already been trained:
+
+```bash
+./.venv/bin/python detector.py --live
+```
+
+`detector.py --live` does not retrain the model. It loads the latest saved model and scores new ended auctions as they arrive.
+
+## Demo Workflow
+
+```bash
+# 1. Build synthetic auctions in the isolated demo DB
+./.venv/bin/python collector.py --mode demo
+
+# 2. Train demo-only model artifacts
+./.venv/bin/python train.py --demo --stage isolation
+
+# 3. Score the demo DB using the demo model artifacts
+./.venv/bin/python detector.py --demo --score-all
+
+# 4. Review demo flags without touching the real DB
+./.venv/bin/python dashboard.py --demo --stats
+./.venv/bin/python dashboard.py --demo
+```
+
+## Storage Layout
+
 - Real workflows use:
   - DB: `data/auctions.db`
   - models: `models/`
 - Demo workflows use:
   - DB: `data/demo_auctions.db`
   - models: `models/demo/`
-- On macOS, LightGBM may require OpenMP. If it fails to load, install it with:
+
+## Training Notes
+
+- `train.py` is the only command that retrains models.
+- `collector.py` only gathers data.
+- `detector.py` only loads existing model files and scores auctions.
+- `dashboard.py` only reviews what is already in the database.
+
+### Optional LightGBM
+
+`train.py --stage isolation` and `detector.py` work without LightGBM.
+
+On macOS, LightGBM may require OpenMP:
 
 ```bash
 brew install libomp
 ./.venv/bin/python -m pip install --force-reinstall lightgbm
 ```
 
-- Once you have at least 30 labeled examples, you can optionally train the supervised model:
+Once you have at least 30 labeled examples, you can optionally train the supervised model:
 
 ```bash
 ./.venv/bin/python train.py --stage lgbm
-```
-
-## Demo Workflow
-
-```bash
-# Collect synthetic demo data into the isolated demo DB
-./.venv/bin/python collector.py --mode demo
-
-# Train demo-only model artifacts
-./.venv/bin/python train.py --demo --stage isolation
-
-# Score the demo DB using the demo model artifacts
-./.venv/bin/python detector.py --demo --score-all
-
-# Review demo flags without touching the real DB
-./.venv/bin/python dashboard.py --demo --stats
-./.venv/bin/python dashboard.py --demo
 ```
 
 ## How it works
