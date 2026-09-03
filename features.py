@@ -248,9 +248,16 @@ def compute_features_single(auction: dict) -> dict:
     seller_uuid = auction["seller_uuid"]
     buyer_uuid  = auction.get("buyer_uuid") or ""
     final_price = float(auction["final_price"])
+    item_quantity = max(1, int(auction.get("item_quantity") or 1))
+    has_item_quantity = bool(auction.get("has_item_quantity", False))
+    unit_price = final_price / item_quantity
     tier        = auction.get("tier", "UNKNOWN")
     tier_weight = TIER_MULTIPLIER.get(tier, 1.3)
     features.update(_decoded_item_quality_features(auction))
+    features["item_quantity"] = float(item_quantity)
+    features["log_item_quantity"] = float(np.log1p(item_quantity))
+    features["has_item_quantity"] = 1.0 if has_item_quantity else 0.0
+    features["log_unit_price"] = float(np.log1p(unit_price))
 
     # ── 1. Price signals ───────────────────────────────────────────────────────
     history_sources = _history_sources_for_auction(auction)
@@ -258,7 +265,11 @@ def compute_features_single(auction: dict) -> dict:
         get_item_price_history(item_id, days=MEDIAN_WINDOW_DAYS, allowed_sources=history_sources)
         if item_id else []
     )
-    prices  = [h["final_price"] for h in history if h["auction_id"] != auction_id]
+    comparable_history = [
+        h for h in history
+        if h["auction_id"] != auction_id and bool(h.get("has_item_quantity"))
+    ]
+    prices = [h["final_price"] / max(1, int(h.get("item_quantity") or 1)) for h in comparable_history]
     if features["is_pet"] == 1.0:
         quality_history = _pet_quality_matches(history, auction, auction_id)
     else:
@@ -267,7 +278,10 @@ def compute_features_single(auction: dict) -> dict:
             h for h in history
             if h["auction_id"] != auction_id and _matches_quality_signature(h, quality_signature)
         ]
-    quality_prices = [h["final_price"] for h in quality_history]
+    quality_prices = [
+        h["final_price"] / max(1, int(h.get("item_quantity") or 1))
+        for h in quality_history if bool(h.get("has_item_quantity"))
+    ]
 
     item_median   = _safe_median(prices)
     item_stdev    = _safe_stdev(prices)
@@ -276,21 +290,21 @@ def compute_features_single(auction: dict) -> dict:
 
     features["quality_match_count"] = float(len(quality_prices))
     features["has_quality_median"] = 1.0 if quality_median and quality_median > 0 else 0.0
-    if quality_median and quality_median > 0:
-        features["price_to_quality_median_ratio"] = final_price / quality_median
-        features["price_vs_quality_median_log"] = float(np.log1p(final_price / quality_median))
+    if has_item_quantity and quality_median and quality_median > 0:
+        features["price_to_quality_median_ratio"] = unit_price / quality_median
+        features["price_vs_quality_median_log"] = float(np.log1p(unit_price / quality_median))
     else:
         features["price_to_quality_median_ratio"] = 1.0
         features["price_vs_quality_median_log"] = 0.0
 
-    if quality_median and quality_stdev and quality_stdev > 0:
-        features["quality_price_zscore"] = (final_price - quality_median) / quality_stdev
+    if has_item_quantity and quality_median and quality_stdev and quality_stdev > 0:
+        features["quality_price_zscore"] = (unit_price - quality_median) / quality_stdev
     else:
         features["quality_price_zscore"] = 0.0
 
-    if item_median and item_median > 0:
-        features["price_to_median_ratio"]  = final_price / item_median
-        features["price_vs_median_log"]    = float(np.log1p(final_price / item_median))
+    if has_item_quantity and item_median and item_median > 0:
+        features["price_to_median_ratio"]  = unit_price / item_median
+        features["price_vs_median_log"]    = float(np.log1p(unit_price / item_median))
         features["has_item_median"]        = 1.0
     else:
         # No price history yet — keep values neutral and track that context is missing.
@@ -298,15 +312,15 @@ def compute_features_single(auction: dict) -> dict:
         features["price_vs_median_log"]    = 0.0
         features["has_item_median"]        = 0.0
 
-    if item_median and item_stdev and item_stdev > 0:
-        features["price_zscore"] = (final_price - item_median) / item_stdev
+    if has_item_quantity and item_median and item_stdev and item_stdev > 0:
+        features["price_zscore"] = (unit_price - item_median) / item_stdev
     else:
         features["price_zscore"] = 0.0
 
     # lbin_at_time: compare against known lowest BIN at time of sale
     lbin = auction.get("lbin_at_time")
-    if lbin and lbin > 0:
-        features["price_to_lbin_ratio"] = final_price / float(lbin)
+    if has_item_quantity and lbin and lbin > 0:
+        features["price_to_lbin_ratio"] = unit_price / float(lbin)
     else:
         features["price_to_lbin_ratio"] = 1.0
 
@@ -466,6 +480,10 @@ FEATURE_COLUMNS = [
     "has_quality_median",
     "quality_price_zscore",
     "quality_match_count",
+    "item_quantity",
+    "log_item_quantity",
+    "has_item_quantity",
+    "log_unit_price",
     "price_to_lbin_ratio",
     "bid_count",
     "is_bin",

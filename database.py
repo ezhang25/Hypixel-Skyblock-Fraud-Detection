@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS auctions (
     buyer_uuid      TEXT,
     start_price     INTEGER NOT NULL,       -- coins
     final_price     INTEGER NOT NULL,       -- coins
+    item_quantity   INTEGER NOT NULL DEFAULT 1,
+    has_item_quantity BOOLEAN NOT NULL DEFAULT FALSE,
     bid_count       INTEGER DEFAULT 0,
     is_bin          BOOLEAN NOT NULL,       -- Buy It Now vs. auction
     started_at      INTEGER,               -- Unix timestamp ms
@@ -148,6 +150,14 @@ def init_db():
         for column, column_type in AUCTION_METADATA_COLUMNS.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE auctions ADD COLUMN {column} {column_type}")
+        existing = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(auctions)").fetchall()
+        }
+        if "item_quantity" not in existing:
+            conn.execute("ALTER TABLE auctions ADD COLUMN item_quantity INTEGER NOT NULL DEFAULT 1")
+        if "has_item_quantity" not in existing:
+            conn.execute("ALTER TABLE auctions ADD COLUMN has_item_quantity BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decoded_item_id ON auctions(decoded_item_id)")
         # Seed existing databases once. Afterwards insert_auctions maintains this
         # counter independently from retention cleanup of old auction rows.
@@ -179,12 +189,16 @@ def insert_auctions(rows: list[dict]) -> int:
         prepared = dict(row)
         for column in optional_columns:
             prepared.setdefault(column, None)
+        # Quantity is decoded from the NBT item stack. Older callers and
+        # historical records did not have it, so preserve that uncertainty.
+        prepared.setdefault("item_quantity", 1)
+        prepared.setdefault("has_item_quantity", False)
         prepared_rows.append(prepared)
 
     sql = """
         INSERT OR IGNORE INTO auctions
             (auction_id, item_name, item_id, tier, category,
-             seller_uuid, buyer_uuid, start_price, final_price,
+             seller_uuid, buyer_uuid, start_price, final_price, item_quantity, has_item_quantity,
              bid_count, is_bin, started_at, ended_at, time_to_sell_s,
              lbin_at_time, decoded_item_json, decoded_item_id,
              decoded_clean_name, decoded_stars, decoded_recombobulated,
@@ -196,7 +210,7 @@ def insert_auctions(rows: list[dict]) -> int:
              decoded_pet_candy_used, ingested_at, source)
         VALUES
             (:auction_id, :item_name, :item_id, :tier, :category,
-             :seller_uuid, :buyer_uuid, :start_price, :final_price,
+             :seller_uuid, :buyer_uuid, :start_price, :final_price, :item_quantity, :has_item_quantity,
              :bid_count, :is_bin, :started_at, :ended_at, :time_to_sell_s,
              :lbin_at_time, :decoded_item_json, :decoded_item_id,
              :decoded_clean_name, :decoded_stars, :decoded_recombobulated,
@@ -235,7 +249,8 @@ def get_item_price_history(
     cutoff_ms = int((__import__("time").time() - days * 86400) * 1000)
     source_sql, source_params = _source_clause(allowed_sources)
     sql = """
-        SELECT auction_id, item_name, tier, final_price, ended_at, bid_count, is_bin, source,
+        SELECT auction_id, item_name, tier, final_price, item_quantity, has_item_quantity,
+               ended_at, bid_count, is_bin, source,
                item_id, decoded_item_id, decoded_clean_name, decoded_item_json,
                decoded_stars, decoded_recombobulated, decoded_enchant_count,
                decoded_reforge, decoded_pet_type, decoded_pet_tier,
@@ -262,7 +277,8 @@ def get_seller_history(
     cutoff_ms = int((__import__("time").time() - days * 86400) * 1000)
     source_sql, source_params = _source_clause(allowed_sources)
     sql = """
-        SELECT auction_id, item_name, final_price, ended_at, bid_count, is_bin, source
+        SELECT auction_id, item_name, final_price, item_quantity, has_item_quantity,
+               ended_at, bid_count, is_bin, source
         FROM auctions
         WHERE seller_uuid = ? AND ended_at >= ? AND source IN
     """ + source_sql + """
@@ -343,7 +359,7 @@ def get_unreviewed_flags(tier: str | None = None, limit: int = 50) -> list[dict]
     sql = f"""
         SELECT f.id, f.auction_id, f.flagged_at, f.tier,
                f.anomaly_score, f.fraud_prob, f.reasons,
-               a.item_name, a.item_id, a.final_price,
+               a.item_name, a.item_id, a.final_price, a.item_quantity, a.has_item_quantity,
                a.seller_uuid, a.buyer_uuid, a.bid_count, a.is_bin,
                a.decoded_clean_name, a.decoded_stars, a.decoded_reforge,
                a.decoded_enchant_summary, a.decoded_rune_summary,

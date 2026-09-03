@@ -153,7 +153,12 @@ def print_flag(flag: dict, index: int, total: int) -> None:
         if pet.get("pet_candy_used") is not None:
             pet_bits.append(f"Candy used: {int(pet['pet_candy_used'])}")
         print(f"  {BOLD}Pet:{RESET}     " + " | ".join(pet_bits))
-    print(f"  {BOLD}Price:{RESET}   {_fmt_coins(flag['final_price'])} coins")
+    quantity = int(flag.get("item_quantity") or 1)
+    total_price = float(flag["final_price"])
+    if quantity > 1:
+        print(f"  {BOLD}Price:{RESET}   {_fmt_coins(total_price)} coins total × {quantity:,} ({_fmt_coins(total_price / quantity)} each)")
+    else:
+        print(f"  {BOLD}Price:{RESET}   {_fmt_coins(total_price)} coins")
     detail_bits = []
     if flag.get("decoded_reforge"):
         detail_bits.append(f"Reforge: {flag['decoded_reforge']}")

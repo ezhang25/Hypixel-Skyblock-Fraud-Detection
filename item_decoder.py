@@ -53,6 +53,15 @@ def _get_first_stack(raw_nbt: bytes) -> dict[str, Any] | None:
     return None
 
 
+def _extract_stack_count(stack: dict[str, Any]) -> int:
+    """Return the item-stack quantity, falling back safely to one item."""
+    count = stack.get("Count", 1)
+    try:
+        return max(1, int(count))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _summary_from_mapping(value: Any) -> str | None:
     if not isinstance(value, dict) or not value:
         return None
@@ -170,6 +179,7 @@ def decode_item_bytes(item_bytes_field: Any) -> tuple[dict[str, Any] | None, str
 
         metadata = {
             "item_id": item_id,
+            "item_count": _extract_stack_count(stack),
             "clean_name": clean_name,
             "display_name": display_name,
             "lore": display.get("Lore") if isinstance(display.get("Lore"), list) else None,

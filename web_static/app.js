@@ -25,8 +25,11 @@ function renderFlag(flag) {
   tier.classList.add(flag.tier.toLowerCase());
   node.querySelector('.score').textContent = `Score ${Number(flag.anomaly_score || 0).toFixed(3)}`;
   node.querySelector('.item-name').textContent = flag.decoded_clean_name || flag.item_name;
-  node.querySelector('.format').textContent = flag.is_bin ? 'Buy It Now' : `Auction · ${flag.bid_count || 0} bids`;
+  const quantity = Math.max(1, Number(flag.item_quantity || 1));
+  const format = flag.is_bin ? 'Buy It Now' : `Auction · ${flag.bid_count || 0} bids`;
+  node.querySelector('.format').textContent = quantity > 1 ? `${format} · Quantity ${number.format(quantity)}` : format;
   node.querySelector('.price').textContent = `${coins(flag.final_price)} coins`;
+  if (quantity > 1) node.querySelector('.unit-price').textContent = `${coins(flag.final_price / quantity)} each`;
   node.querySelector('.seller').textContent = `Seller: ${flag.seller_uuid || '—'}`;
   node.querySelector('.buyer').textContent = `Buyer: ${flag.buyer_uuid || '—'}`;
   const reasons = node.querySelector('.reasons');

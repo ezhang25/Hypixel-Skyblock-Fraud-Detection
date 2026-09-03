@@ -91,6 +91,8 @@ def _metadata_columns(decoded_item: dict | None) -> dict:
             "decoded_pet_exp": None,
             "decoded_pet_held_item": None,
             "decoded_pet_candy_used": None,
+            "item_quantity": 1,
+            "has_item_quantity": False,
         }
 
     pet = decoded_item.get("pet") or {}
@@ -117,6 +119,8 @@ def _metadata_columns(decoded_item: dict | None) -> dict:
         "decoded_pet_exp": pet.get("pet_exp"),
         "decoded_pet_held_item": pet.get("pet_held_item"),
         "decoded_pet_candy_used": pet.get("pet_candy_used"),
+        "item_quantity": max(1, int(decoded_item.get("item_count") or 1)),
+        "has_item_quantity": True,
     }
 
 
@@ -158,6 +162,8 @@ def _normalise_ended(raw: dict) -> dict | None:
             "auction_id":    str(auction_id),
             "item_name":     str(item_name)[:256],
             "item_id":       metadata["decoded_item_id"],
+            "item_quantity": metadata["item_quantity"],
+            "has_item_quantity": metadata["has_item_quantity"],
             "tier":          raw.get("tier", "UNKNOWN"),
             "category":      raw.get("category", "misc"),
             "seller_uuid":   str(seller_uuid),
@@ -364,6 +370,8 @@ def generate_demo_data(n_normal: int = 2000, n_suspicious: int = 50) -> None:
             "buyer_uuid":    random.choice(buyers),
             "start_price":   int(price * 0.8),
             "final_price":   price,
+            "item_quantity": 1,
+            "has_item_quantity": True,
             "bid_count":     random.randint(1, 20),
             "is_bin":        random.random() < 0.4,
             "started_at":    start_ms,
@@ -393,6 +401,8 @@ def generate_demo_data(n_normal: int = 2000, n_suspicious: int = 50) -> None:
             "buyer_uuid":    irl_buyer,
             "start_price":   price,
             "final_price":   price,
+            "item_quantity": 1,
+            "has_item_quantity": True,
             "bid_count":     random.randint(0, 1),
             "is_bin":        True,
             "started_at":    start_ms,

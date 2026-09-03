@@ -137,7 +137,7 @@ Once you have at least 30 labeled examples, you can optionally train the supervi
 
 ## IRL Trading Signals
 
-- Sale price >> rolling median for that item (price_to_median_ratio)
+- Per-item sale price >> rolling median for that item (price_to_median_ratio). Stack quantities are decoded from item NBT, so a 64-item sale is compared using its per-item price rather than its full stack price.
 - Zero or one competing bids on high-value items
 - BIN (Buy It Now) rather than auction format
 - Same seller/buyer pair appearing repeatedly
