@@ -103,68 +103,12 @@ def _matches_quality_signature(candidate: dict, signature: tuple) -> bool:
 
 
 def _pet_quality_matches(history: list[dict], auction: dict, auction_id: str) -> list[dict]:
-    pet = _pet_metadata(auction)
-    pet_type = pet.get("pet_type") or "UNKNOWN"
-    pet_tier = pet.get("pet_tier") or auction.get("tier") or "UNKNOWN"
-    pet_level = int(pet.get("pet_level") or 0)
-    pet_level_bucket = min((pet_level // 10) * 10, 100)
-
+    """Return only exact pet-quality matches; never approximate a pet baseline."""
     exact_signature = _quality_signature(auction)
-    exact_matches = [
+    return [
         h for h in history
         if h["auction_id"] != auction_id and _matches_quality_signature(h, exact_signature)
     ]
-    if exact_matches:
-        return exact_matches
-
-    tier_bucket_matches = []
-    for candidate in history:
-        if candidate["auction_id"] == auction_id:
-            continue
-        candidate_pet = _pet_metadata(candidate)
-        candidate_level = int(candidate_pet.get("pet_level") or 0)
-        candidate_level_bucket = min((candidate_level // 10) * 10, 100)
-        if (
-            (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
-            and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
-            and candidate_level_bucket == pet_level_bucket
-        ):
-            tier_bucket_matches.append(candidate)
-    if tier_bucket_matches:
-        return tier_bucket_matches
-
-    if pet_level >= 90:
-        high_level_matches = []
-        for candidate in history:
-            if candidate["auction_id"] == auction_id:
-                continue
-            candidate_pet = _pet_metadata(candidate)
-            candidate_level = int(candidate_pet.get("pet_level") or 0)
-            if (
-                (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
-                and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
-                and candidate_level >= 90
-            ):
-                high_level_matches.append(candidate)
-        if high_level_matches:
-            return high_level_matches
-
-    nearby_level_matches = []
-    for candidate in history:
-        if candidate["auction_id"] == auction_id:
-            continue
-        candidate_pet = _pet_metadata(candidate)
-        candidate_level = int(candidate_pet.get("pet_level") or 0)
-        if (
-            (candidate_pet.get("pet_type") or "UNKNOWN") == pet_type
-            and (candidate_pet.get("pet_tier") or candidate.get("tier") or "UNKNOWN") == pet_tier
-            and abs(candidate_level - pet_level) <= 10
-        ):
-            nearby_level_matches.append(candidate)
-    if nearby_level_matches:
-        return nearby_level_matches
-
-    return []
 
 
 def _safe_numeric(value, default: float = 0.0) -> float:
@@ -413,13 +357,6 @@ def compute_features_single(auction: dict) -> dict:
     else:
         features["seller_price_zscore"] = 0.0
 
-    # Fraction of seller's recent sales that were BIN
-    if seller_hist:
-        bin_fraction = sum(1 for h in seller_hist if h["is_bin"]) / len(seller_hist)
-        features["seller_bin_fraction"] = bin_fraction
-    else:
-        features["seller_bin_fraction"] = 0.0
-
     # ── 4. Pair signals ────────────────────────────────────────────────────────
     if buyer_uuid:
         pair_count = get_pair_frequency(seller_uuid, buyer_uuid, days=30)
@@ -542,7 +479,6 @@ FEATURE_COLUMNS = [
     "price_to_seller_avg_ratio",
     "has_seller_history",
     "seller_price_zscore",
-    "seller_bin_fraction",
     "seller_buyer_pair_count_30d",
     "repeat_pair",
     "tier_weight",
