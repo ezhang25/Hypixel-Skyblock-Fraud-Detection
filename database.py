@@ -9,11 +9,33 @@ Tables:
 
 import sqlite3
 import logging
+import json
 from contextlib import contextmanager
 from pathlib import Path
 import config
 
 logger = logging.getLogger(__name__)
+
+
+def _backfill_missing_rarities(conn: sqlite3.Connection) -> int:
+    """Repair old UNKNOWN tiers from the decoded NBT lore saved in SQLite."""
+    from item_decoder import extract_rarity_from_lore
+
+    rows = conn.execute(
+        "SELECT auction_id, decoded_item_json FROM auctions WHERE tier IS NULL OR tier = 'UNKNOWN'"
+    ).fetchall()
+    updates = []
+    for row in rows:
+        try:
+            decoded = json.loads(row["decoded_item_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        rarity = extract_rarity_from_lore(decoded.get("lore") if isinstance(decoded, dict) else None)
+        if rarity:
+            updates.append((rarity, row["auction_id"]))
+    if updates:
+        conn.executemany("UPDATE auctions SET tier = ? WHERE auction_id = ?", updates)
+    return len(updates)
 
 AUCTION_METADATA_COLUMNS = {
     "decoded_item_json": "TEXT",
@@ -159,6 +181,7 @@ def init_db():
         if "has_item_quantity" not in existing:
             conn.execute("ALTER TABLE auctions ADD COLUMN has_item_quantity BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decoded_item_id ON auctions(decoded_item_id)")
+        repaired_rarities = _backfill_missing_rarities(conn)
         # Seed existing databases once. Afterwards insert_auctions maintains this
         # counter independently from retention cleanup of old auction rows.
         conn.execute("""
@@ -167,6 +190,8 @@ def init_db():
             FROM auctions
         """)
     logger.info(f"Database initialised at {config.get_db_path()}")
+    if repaired_rarities:
+        logger.info("Repaired rarity tier from NBT lore for %s existing auctions", repaired_rarities)
 
 
 def insert_auctions(rows: list[dict]) -> int:

@@ -124,6 +124,18 @@ def _metadata_columns(decoded_item: dict | None) -> dict:
     }
 
 
+def _normalise_tier(value: object) -> str | None:
+    """Keep valid API rarities and reject missing/placeholder values."""
+    if not isinstance(value, str):
+        return None
+    tier = value.upper().replace("_", " ").strip()
+    valid_tiers = {
+        "COMMON", "UNCOMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC",
+        "SUPREME", "DIVINE", "SPECIAL", "VERY SPECIAL",
+    }
+    return tier if tier in valid_tiers else None
+
+
 def _normalise_ended(raw: dict) -> dict | None:
     """
     Map a raw auction object from the Hypixel API into our DB schema.
@@ -155,6 +167,9 @@ def _normalise_ended(raw: dict) -> dict | None:
             time_to_sell = max(0, int((ended_at - started_at) / 1000))
 
         metadata = _metadata_columns(decoded_item)
+        # The ended-auctions endpoint intentionally omits `tier`; use the
+        # reliable raw field when present (e.g. backfill), otherwise NBT lore.
+        tier = _normalise_tier(raw.get("tier")) or (decoded_item or {}).get("rarity") or "UNKNOWN"
         bids = raw.get("bids", [])
         bid_count = int(bids) if isinstance(bids, int) else len(bids) if isinstance(bids, list) else 0
 
@@ -164,7 +179,7 @@ def _normalise_ended(raw: dict) -> dict | None:
             "item_id":       metadata["decoded_item_id"],
             "item_quantity": metadata["item_quantity"],
             "has_item_quantity": metadata["has_item_quantity"],
-            "tier":          raw.get("tier", "UNKNOWN"),
+            "tier":          tier,
             "category":      raw.get("category", "misc"),
             "seller_uuid":   str(seller_uuid),
             "buyer_uuid":    str(raw.get("buyer", "")) or None,

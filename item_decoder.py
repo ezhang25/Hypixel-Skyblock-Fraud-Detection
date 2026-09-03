@@ -15,6 +15,9 @@ import nbtlib
 
 
 FORMAT_CODE_RE = re.compile(r"\u00A7.")
+RARITY_RE = re.compile(
+    r"\b(VERY SPECIAL|SPECIAL|DIVINE|SUPREME|MYTHIC|LEGENDARY|EPIC|RARE|UNCOMMON|COMMON)\b"
+)
 
 
 def strip_minecraft_formatting(text: str | None) -> str | None:
@@ -22,6 +25,22 @@ def strip_minecraft_formatting(text: str | None) -> str | None:
         return None
     cleaned = FORMAT_CODE_RE.sub("", text).strip()
     return cleaned or None
+
+
+def extract_rarity_from_lore(lore: Any) -> str | None:
+    """Return the rarity written in an item's descriptive NBT lore lines."""
+    if not isinstance(lore, list):
+        return None
+    for line in reversed(lore):
+        if not isinstance(line, str):
+            continue
+        cleaned = strip_minecraft_formatting(line)
+        if not cleaned:
+            continue
+        match = RARITY_RE.search(cleaned.upper())
+        if match:
+            return match.group(1)
+    return None
 
 
 def extract_item_bytes_data(item_bytes_field: Any) -> str | None:
@@ -180,6 +199,7 @@ def decode_item_bytes(item_bytes_field: Any) -> tuple[dict[str, Any] | None, str
         metadata = {
             "item_id": item_id,
             "item_count": _extract_stack_count(stack),
+            "rarity": extract_rarity_from_lore(display.get("Lore")),
             "clean_name": clean_name,
             "display_name": display_name,
             "lore": display.get("Lore") if isinstance(display.get("Lore"), list) else None,
