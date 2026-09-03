@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Skyblock Fraud Detector</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Hypixel SkyBlock</p>
+          <h1>Fraud detector</h1>
+          <p class="subhead">Review suspicious auction activity as it arrives.</p>
+        </div>
+        <button id="refresh" class="secondary">Refresh data</button>
+      </header>
+
+      <section class="stats" aria-label="Detector statistics">
+        <article><span>All-time ingested</span><strong id="all-time">—</strong></article>
+        <article><span>Currently retained</span><strong id="retained">—</strong></article>
+        <article><span>Awaiting review</span><strong id="unreviewed">—</strong></article>
+        <article><span>Confirmed IRL</span><strong id="confirmed">—</strong></article>
+      </section>
+
+      <section class="review-panel">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">Review queue</p>
+            <h2>Flagged auctions</h2>
+          </div>
+          <label class="filter">Tier
+            <select id="tier-filter">
+              <option value="">All tiers</option>
+              <option value="HIGH">High</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="LOW">Low</option>
+            </select>
+          </label>
+        </div>
+        <p id="status" class="status" aria-live="polite"></p>
+        <div id="flags" class="flag-grid"></div>
+      </section>
+    </main>
+    <template id="flag-template">
+      <article class="flag-card">
+        <div class="flag-heading">
+          <span class="tier"></span>
+          <span class="score"></span>
+        </div>
+        <h3 class="item-name"></h3>
+        <dl class="details"></dl>
+        <div class="reasons-wrap"><h4>Why it was flagged</h4><ul class="reasons"></ul></div>
+        <textarea class="notes" maxlength="1000" placeholder="Optional review notes"></textarea>
+        <div class="actions">
+          <button class="confirm">Confirm IRL trade</button>
+          <button class="false-positive secondary">False positive</button>
+        </div>
+      </article>
+    </template>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

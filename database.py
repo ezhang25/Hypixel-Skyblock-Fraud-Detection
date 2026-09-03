@@ -362,6 +362,16 @@ def get_unreviewed_flags(tier: str | None = None, limit: int = 50) -> list[dict]
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def is_unreviewed_flag(auction_id: str) -> bool:
+    """Return whether an auction is still eligible for review."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM flagged WHERE auction_id = ? AND reviewed = FALSE",
+            (auction_id,),
+        ).fetchone()
+    return row is not None
+
+
 def label_auction(auction_id: str, label: int, notes: str = "") -> None:
     """Mark a flagged auction as confirmed IRL trade (1) or false positive (0)."""
     import time
