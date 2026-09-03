@@ -105,7 +105,8 @@ def _format_pet_type(pet_type: str | None, fallback_name: str) -> str:
 def print_stats() -> None:
     stats = db_stats()
     print(f"\n{BOLD}══ IRL Trade Detector — Database Stats ══{RESET}")
-    print(f"  Total auctions ingested:  {stats['total_auctions']:>10,}")
+    print(f"  All-time auctions ingested: {stats['all_time_auctions_ingested']:>8,}")
+    print(f"  Auctions currently retained: {stats['total_auctions']:>7,}")
     print(f"  Total flags raised:       {stats['flagged_total']:>10,}")
     print(f"  Awaiting review:          {stats['flagged_unreviewed']:>10,}")
     print(f"  Manually labeled:         {stats['labeled']:>10,}")

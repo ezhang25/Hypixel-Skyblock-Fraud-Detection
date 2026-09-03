@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS labels (
     labeled_at      INTEGER NOT NULL,
     notes           TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ingestion_metrics (
+    metric_name     TEXT PRIMARY KEY,
+    metric_value    INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
 """
 
 
@@ -143,6 +149,13 @@ def init_db():
             if column not in existing:
                 conn.execute(f"ALTER TABLE auctions ADD COLUMN {column} {column_type}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decoded_item_id ON auctions(decoded_item_id)")
+        # Seed existing databases once. Afterwards insert_auctions maintains this
+        # counter independently from retention cleanup of old auction rows.
+        conn.execute("""
+            INSERT OR IGNORE INTO ingestion_metrics (metric_name, metric_value, updated_at)
+            SELECT 'all_time_auctions_ingested', COUNT(*), CAST(strftime('%s', 'now') AS INTEGER) * 1000
+            FROM auctions
+        """)
     logger.info(f"Database initialised at {config.get_db_path()}")
 
 
@@ -196,7 +209,16 @@ def insert_auctions(rows: list[dict]) -> int:
     """
     with get_conn() as conn:
         cursor = conn.executemany(sql, prepared_rows)
-        return cursor.rowcount
+        inserted = max(cursor.rowcount, 0)
+        if inserted:
+            conn.execute("""
+                INSERT INTO ingestion_metrics (metric_name, metric_value, updated_at)
+                VALUES ('all_time_auctions_ingested', ?, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+                ON CONFLICT(metric_name) DO UPDATE SET
+                    metric_value = metric_value + excluded.metric_value,
+                    updated_at = excluded.updated_at
+            """, (inserted,))
+        return inserted
 
 
 def _source_clause(allowed_sources: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
@@ -370,8 +392,15 @@ def get_labeled_dataset() -> list[dict]:
 def db_stats() -> dict:
     """Quick counts for each table — useful for monitoring."""
     with get_conn() as conn:
+        retained_auctions = conn.execute("SELECT COUNT(*) FROM auctions").fetchone()[0]
+        all_time_row = conn.execute("""
+            SELECT metric_value
+            FROM ingestion_metrics
+            WHERE metric_name = 'all_time_auctions_ingested'
+        """).fetchone()
         return {
-            "total_auctions":     conn.execute("SELECT COUNT(*) FROM auctions").fetchone()[0],
+            "total_auctions":     retained_auctions,
+            "all_time_auctions_ingested": all_time_row[0] if all_time_row else retained_auctions,
             "flagged_total":      conn.execute("SELECT COUNT(*) FROM flagged").fetchone()[0],
             "flagged_unreviewed": conn.execute("SELECT COUNT(*) FROM flagged WHERE reviewed=FALSE").fetchone()[0],
             "labeled":            conn.execute("SELECT COUNT(*) FROM labels").fetchone()[0],
