@@ -359,13 +359,16 @@ def get_unreviewed_flags(tier: str | None = None, limit: int = 50) -> list[dict]
     sql = f"""
         SELECT f.id, f.auction_id, f.flagged_at, f.tier,
                f.anomaly_score, f.fraud_prob, f.reasons,
-               a.item_name, a.item_id, a.final_price, a.item_quantity, a.has_item_quantity,
+               a.item_name, a.item_id, a.tier AS item_rarity, a.category,
+               a.final_price, a.item_quantity, a.has_item_quantity,
                a.seller_uuid, a.buyer_uuid, a.bid_count, a.is_bin,
-               a.decoded_clean_name, a.decoded_stars, a.decoded_reforge,
+               a.decoded_clean_name, a.decoded_stars, a.decoded_recombobulated,
+               a.decoded_hot_potato_count, a.decoded_fuming_potato_count,
+               a.decoded_reforge, a.decoded_dungeon_tier, a.decoded_skin, a.decoded_dye,
                a.decoded_enchant_summary, a.decoded_rune_summary,
                a.decoded_gemstone_summary, a.decoded_attribute_summary,
                a.decoded_item_json, a.decoded_pet_type, a.decoded_pet_tier,
-               a.decoded_pet_level, a.decoded_pet_held_item,
+               a.decoded_pet_level, a.decoded_pet_exp, a.decoded_pet_held_item,
                a.decoded_pet_candy_used
         FROM flagged f
         JOIN auctions a ON f.auction_id = a.auction_id
