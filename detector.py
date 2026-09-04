@@ -352,19 +352,21 @@ def score_auction(auction: dict, bundle: ModelBundle) -> dict | None:
 
 def score_all_existing(bundle: ModelBundle) -> None:
     """Rescore all auctions using the batched feature path used by training."""
-    with get_conn() as conn:
-        rows = {
-            row["auction_id"]: dict(row)
-            for row in conn.execute(
-                "SELECT auction_id, item_name, decoded_skin, decoded_item_json FROM auctions"
-            ).fetchall()
-        }
-
-    logger.info("Computing batched features for %s existing auctions...", len(rows))
+    logger.info("Computing batched features for existing auctions...")
     feature_frame = compute_features_batch()
     if feature_frame.empty:
         logger.warning("No features available; leaving the existing flagged queue unchanged.")
         return
+
+    # Load only the fields needed by the evidence gate after feature calculation.
+    # Keeping decoded_item_json out of memory prevents swapping on t3.micro.
+    with get_conn() as conn:
+        rows = {
+            row["auction_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT auction_id, item_name, decoded_skin FROM auctions"
+            ).fetchall()
+        }
 
     cleared = reset_flagged_queue()
     logger.info("Cleared %s stale flagged rows before full rescore", cleared)
