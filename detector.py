@@ -45,7 +45,7 @@ from database import (
     reset_flagged_queue,
 )
 from collector import fetch_ended_auctions, _normalise_ended
-from features import compute_features_single, FEATURE_COLUMNS
+from features import compute_features_batch, compute_features_single, FEATURE_COLUMNS
 
 try:
     import lightgbm  # noqa — just checking it's available
@@ -290,18 +290,8 @@ def _build_reasons(features: dict, scores: dict) -> list[str]:
     return reasons or ["Pattern matches known IRL trading signals"]
 
 
-def score_auction(auction: dict, bundle: ModelBundle) -> dict | None:
-    """
-    Score one auction. Returns a flag record if suspicious, else None.
-    Hard-floor: if price_to_median_ratio < PRICE_RATIO_HARD_FLOOR, skip model
-    (not worth scoring legitimately priced auctions).
-    """
-    try:
-        features = compute_features_single(auction)
-    except Exception as e:
-        logger.debug(f"Feature error for {auction.get('auction_id')}: {e}")
-        return None
-
+def _score_features(auction: dict, features: dict, bundle: ModelBundle) -> dict | None:
+    """Apply model and evidence gates to an already-computed feature record."""
     # Hard price floor — if price is within normal range, skip entirely
     pmr = features.get("price_to_median_ratio", -1)
     if 0 < pmr < PRICE_RATIO_HARD_FLOOR:
@@ -348,24 +338,46 @@ def score_auction(auction: dict, bundle: ModelBundle) -> dict | None:
     }
 
 
+def score_auction(auction: dict, bundle: ModelBundle) -> dict | None:
+    """Compute live features for one auction, then score it."""
+    try:
+        features = compute_features_single(auction)
+    except Exception as e:
+        logger.debug(f"Feature error for {auction.get('auction_id')}: {e}")
+        return None
+    return _score_features(auction, features, bundle)
+
+
 # ── Ingestion modes ────────────────────────────────────────────────────────────
 
 def score_all_existing(bundle: ModelBundle) -> None:
-    """Score every auction already in the DB. Useful for backtest / first run."""
+    """Rescore all auctions using the batched feature path used by training."""
     with get_conn() as conn:
-        rows = [dict(r) for r in conn.execute("SELECT * FROM auctions").fetchall()]
+        rows = {
+            row["auction_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT auction_id, item_name, decoded_skin, decoded_item_json FROM auctions"
+            ).fetchall()
+        }
+
+    logger.info("Computing batched features for %s existing auctions...", len(rows))
+    feature_frame = compute_features_batch()
+    if feature_frame.empty:
+        logger.warning("No features available; leaving the existing flagged queue unchanged.")
+        return
 
     cleared = reset_flagged_queue()
     logger.info("Cleared %s stale flagged rows before full rescore", cleared)
-    logger.info(f"Scoring {len(rows)} existing auctions...")
+    logger.info("Scoring %s existing auctions...", len(feature_frame))
     flagged = 0
-    for auction in rows:
-        flag = score_auction(auction, bundle)
+    for auction_id, feature_row in feature_frame.iterrows():
+        auction = rows[auction_id]
+        flag = _score_features(auction, feature_row.to_dict(), bundle)
         if flag:
             insert_flag(flag)
             flagged += 1
 
-    logger.info(f"Done. Flagged {flagged} / {len(rows)} auctions.")
+    logger.info(f"Done. Flagged {flagged} / {len(feature_frame)} auctions.")
     logger.info(f"DB stats: {db_stats()}")
 
 
