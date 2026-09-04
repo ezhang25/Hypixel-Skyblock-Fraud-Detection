@@ -15,6 +15,10 @@ Feature groups:
 import json
 import logging
 import re
+import math
+import time
+from bisect import bisect_left
+from collections import Counter, defaultdict
 from statistics import median, stdev
 
 from runtime import log_runtime_environment
@@ -39,6 +43,17 @@ from database import (
 logger = logging.getLogger(__name__)
 PET_LEVEL_RE = re.compile(r"\[Lvl\s+(\d+)\]")
 PET_MIN_SALES_FOR_MEDIAN = 2
+FEATURE_AUCTION_COLUMNS = (
+    "auction_id", "item_name", "item_id", "tier", "seller_uuid", "buyer_uuid",
+    "final_price", "item_quantity", "has_item_quantity", "bid_count", "is_bin",
+    "ended_at", "time_to_sell_s", "lbin_at_time", "source", "decoded_item_id",
+    "decoded_clean_name", "decoded_stars", "decoded_recombobulated",
+    "decoded_hot_potato_count", "decoded_fuming_potato_count", "decoded_reforge",
+    "decoded_enchant_count", "decoded_rune_summary", "decoded_gemstone_summary",
+    "decoded_attribute_summary", "decoded_pet_type", "decoded_pet_tier",
+    "decoded_pet_level", "decoded_pet_exp", "decoded_pet_held_item",
+    "decoded_pet_candy_used",
+)
 
 # Rarity tier weights — rarer items legitimately sell for more variance
 TIER_MULTIPLIER = {
@@ -51,8 +66,111 @@ TIER_MULTIPLIER = {
     "DIVINE":    2.0,
     "SPECIAL":   2.5,
     "VERY_SPECIAL": 3.0,
+    "VERY SPECIAL": 3.0,
     "UNKNOWN":   1.3,
 }
+
+
+class _ValueGroup:
+    """Sorted numeric values with O(log n) statistics excluding one auction."""
+
+    def __init__(self, entries: list[tuple[str, float]]):
+        self.by_auction_id = {auction_id: value for auction_id, value in entries}
+        self.values = sorted(self.by_auction_id.values())
+        self.total = sum(self.values)
+        self.total_sq = sum(value * value for value in self.values)
+
+    def stats_without(self, auction_id: str) -> tuple[int, float | None, float | None]:
+        removed = self.by_auction_id.get(auction_id)
+        count = len(self.values) - (1 if removed is not None else 0)
+        if count <= 0:
+            return 0, None, None
+
+        removal_index = bisect_left(self.values, removed) if removed is not None else None
+
+        def value_at(index: int) -> float:
+            if removal_index is not None and index >= removal_index:
+                return self.values[index + 1]
+            return self.values[index]
+
+        middle = count // 2
+        median_value = (
+            value_at(middle)
+            if count % 2 else (value_at(middle - 1) + value_at(middle)) / 2
+        )
+        if count < 2:
+            return count, median_value, None
+
+        total = self.total - (removed or 0.0)
+        total_sq = self.total_sq - ((removed or 0.0) ** 2)
+        variance = max(0.0, (total_sq - (total * total) / count) / (count - 1))
+        return count, median_value, math.sqrt(variance)
+
+
+class _FeatureBatchContext:
+    """In-memory history indexes used only by offline/batch training."""
+
+    def __init__(self, rows: list[dict]):
+        now_ms = int(time.time() * 1000)
+        price_cutoff = now_ms - MEDIAN_WINDOW_DAYS * 86_400_000
+        seller_cutoff = now_ms - 30 * 86_400_000
+        item_entries: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+        quality_entries: dict[tuple[str, tuple], list[tuple[str, float]]] = defaultdict(list)
+        seller_entries: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+        pair_entries: Counter[tuple[str, str]] = Counter()
+
+        for row in rows:
+            source = row.get("source", "ended")
+            ended_at = int(row.get("ended_at") or 0)
+            modes = ("real", "demo") if source == "ended" else (("demo",) if source == "demo" else ())
+            auction_id = row["auction_id"]
+
+            if ended_at >= price_cutoff and modes:
+                item_key = row.get("item_id")
+                if bool(row.get("has_item_quantity")) and item_key:
+                    unit_price = float(row["final_price"]) / max(1, int(row.get("item_quantity") or 1))
+                    signature = _quality_signature(row)
+                    for mode in modes:
+                        item_entries[(mode, item_key)].append((auction_id, unit_price))
+                        quality_entries[(mode, signature)].append((auction_id, unit_price))
+
+            if ended_at >= seller_cutoff and modes:
+                seller = row.get("seller_uuid")
+                if seller:
+                    for mode in modes:
+                        seller_entries[(mode, seller)].append((auction_id, float(row["final_price"])))
+
+            buyer = row.get("buyer_uuid")
+            seller = row.get("seller_uuid")
+            if ended_at >= seller_cutoff and buyer and seller:
+                pair_entries[(seller, buyer)] += 1
+
+        self.item_groups = {key: _ValueGroup(entries) for key, entries in item_entries.items()}
+        self.quality_groups = {key: _ValueGroup(entries) for key, entries in quality_entries.items()}
+        self.seller_groups = {key: _ValueGroup(entries) for key, entries in seller_entries.items()}
+        self.pair_counts = pair_entries
+
+    @staticmethod
+    def _mode(auction: dict) -> str:
+        return "demo" if auction.get("source") == "demo" else "real"
+
+    def price_stats(self, auction: dict) -> tuple[int, float | None, float | None, int, float | None, float | None]:
+        mode = self._mode(auction)
+        auction_id = auction["auction_id"]
+        item_key = auction.get("item_id") or auction.get("item_name")
+        item_group = self.item_groups.get((mode, item_key))
+        quality_group = self.quality_groups.get((mode, _quality_signature(auction)))
+        item_stats = item_group.stats_without(auction_id) if item_group else (0, None, None)
+        quality_stats = quality_group.stats_without(auction_id) if quality_group else (0, None, None)
+        return (*item_stats, *quality_stats)
+
+    def seller_stats(self, auction: dict) -> tuple[int, float | None, float | None]:
+        group = self.seller_groups.get((self._mode(auction), auction.get("seller_uuid")))
+        return group.stats_without(auction["auction_id"]) if group else (0, None, None)
+
+    def pair_count(self, auction: dict) -> int:
+        buyer = auction.get("buyer_uuid") or ""
+        return self.pair_counts.get((auction.get("seller_uuid"), buyer), 0) if buyer else 0
 
 
 def _safe_median(values: list[float]) -> float | None:
@@ -236,7 +354,7 @@ def _decoded_item_quality_features(auction: dict) -> dict[str, float]:
     }
 
 
-def compute_features_single(auction: dict) -> dict:
+def compute_features_single(auction: dict, batch_context: _FeatureBatchContext | None = None) -> dict:
     """
     Compute the full feature vector for one auction record.
     Makes DB lookups for context — suitable for live inference.
@@ -260,35 +378,44 @@ def compute_features_single(auction: dict) -> dict:
     features["log_unit_price"] = float(np.log1p(unit_price))
 
     # ── 1. Price signals ───────────────────────────────────────────────────────
-    history_sources = _history_sources_for_auction(auction)
-    history = (
-        get_item_price_history(item_id, days=MEDIAN_WINDOW_DAYS, allowed_sources=history_sources)
-        if item_id else []
-    )
-    comparable_history = [
-        h for h in history
-        if h["auction_id"] != auction_id and bool(h.get("has_item_quantity"))
-    ]
-    prices = [h["final_price"] / max(1, int(h.get("item_quantity") or 1)) for h in comparable_history]
-    if features["is_pet"] == 1.0:
-        quality_history = _pet_quality_matches(history, auction, auction_id)
+    if batch_context is not None:
+        item_count, item_median, item_stdev, quality_count, quality_median, quality_stdev = batch_context.price_stats(auction)
     else:
-        quality_signature = _quality_signature(auction)
-        quality_history = [
+        history_sources = _history_sources_for_auction(auction)
+        history = (
+            get_item_price_history(item_id, days=MEDIAN_WINDOW_DAYS, allowed_sources=history_sources)
+            if item_id else []
+        )
+        comparable_history = [
             h for h in history
-            if h["auction_id"] != auction_id and _matches_quality_signature(h, quality_signature)
+            if h["auction_id"] != auction_id and bool(h.get("has_item_quantity"))
         ]
-    quality_prices = [
-        h["final_price"] / max(1, int(h.get("item_quantity") or 1))
-        for h in quality_history if bool(h.get("has_item_quantity"))
-    ]
+        prices = [h["final_price"] / max(1, int(h.get("item_quantity") or 1)) for h in comparable_history]
+        if features["is_pet"] == 1.0:
+            quality_history = _pet_quality_matches(history, auction, auction_id)
+        else:
+            quality_signature = _quality_signature(auction)
+            quality_history = [
+                h for h in history
+                if h["auction_id"] != auction_id and _matches_quality_signature(h, quality_signature)
+            ]
+        quality_prices = [
+            h["final_price"] / max(1, int(h.get("item_quantity") or 1))
+            for h in quality_history if bool(h.get("has_item_quantity"))
+        ]
+        item_count = len(prices)
+        quality_count = len(quality_prices)
+        item_median = _safe_median(prices)
+        item_stdev = _safe_stdev(prices)
+        quality_median = _safe_quality_median(quality_prices, features["is_pet"] == 1.0)
+        quality_stdev = _safe_stdev(quality_prices)
 
-    item_median   = _safe_median(prices)
-    item_stdev    = _safe_stdev(prices)
-    quality_median = _safe_quality_median(quality_prices, features["is_pet"] == 1.0)
-    quality_stdev = _safe_stdev(quality_prices)
+    if item_count < MIN_SALES_FOR_MEDIAN:
+        item_median = None
+    if quality_count < (PET_MIN_SALES_FOR_MEDIAN if features["is_pet"] == 1.0 else MIN_SALES_FOR_MEDIAN):
+        quality_median = None
 
-    features["quality_match_count"] = float(len(quality_prices))
+    features["quality_match_count"] = float(quality_count)
     features["has_quality_median"] = 1.0 if quality_median and quality_median > 0 else 0.0
     if has_item_quantity and quality_median and quality_median > 0:
         features["price_to_quality_median_ratio"] = unit_price / quality_median
@@ -350,14 +477,19 @@ def compute_features_single(auction: dict) -> dict:
         features["very_fast_sale"]    = 0.0
 
     # ── 3. Seller history ──────────────────────────────────────────────────────
-    seller_hist  = get_seller_history(seller_uuid, days=30, allowed_sources=history_sources)
-    seller_prices = [h["final_price"] for h in seller_hist
-                     if h["auction_id"] != auction_id]
+    if batch_context is not None:
+        seller_count, seller_median, seller_stdev = batch_context.seller_stats(auction)
+    else:
+        seller_hist = get_seller_history(seller_uuid, days=30, allowed_sources=history_sources)
+        seller_prices = [h["final_price"] for h in seller_hist if h["auction_id"] != auction_id]
+        seller_count = len(seller_prices)
+        seller_median = _safe_median(seller_prices)
+        seller_stdev = _safe_stdev(seller_prices)
 
-    seller_median = _safe_median(seller_prices)
-    seller_stdev  = _safe_stdev(seller_prices)
+    if seller_count < MIN_SALES_FOR_MEDIAN:
+        seller_median = None
 
-    features["seller_sale_count_30d"] = float(len(seller_prices))
+    features["seller_sale_count_30d"] = float(seller_count)
 
     if seller_median and seller_median > 0:
         features["price_to_seller_avg_ratio"] = final_price / seller_median
@@ -373,7 +505,7 @@ def compute_features_single(auction: dict) -> dict:
 
     # ── 4. Pair signals ────────────────────────────────────────────────────────
     if buyer_uuid:
-        pair_count = get_pair_frequency(seller_uuid, buyer_uuid, days=30)
+        pair_count = batch_context.pair_count(auction) if batch_context is not None else get_pair_frequency(seller_uuid, buyer_uuid, days=30)
         features["seller_buyer_pair_count_30d"] = float(pair_count)
         # Pair transacting 3+ times in a month is a strong signal
         features["repeat_pair"]                 = 1.0 if pair_count >= 3 else 0.0
@@ -432,7 +564,8 @@ def compute_features_batch(auction_ids: list[str] | None = None) -> pd.DataFrame
     Much faster than calling compute_features_single in a loop because
     we bulk-load the price histories in one query.
     """
-    sql = "SELECT * FROM auctions"
+    selected_columns = ", ".join(FEATURE_AUCTION_COLUMNS)
+    sql = f"SELECT {selected_columns} FROM auctions"
     params: list = []
     if auction_ids:
         placeholders = ",".join("?" * len(auction_ids))
@@ -441,19 +574,25 @@ def compute_features_batch(auction_ids: list[str] | None = None) -> pd.DataFrame
 
     with get_conn() as conn:
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        # A requested subset still needs the entire retained dataset as context,
+        # just as the live single-auction path does.
+        context_rows = rows if not auction_ids else [
+            dict(r) for r in conn.execute(f"SELECT {selected_columns} FROM auctions").fetchall()
+        ]
 
     if not rows:
         logger.warning("No auctions found in DB for feature computation.")
         return pd.DataFrame()
 
     logger.info(f"Computing features for {len(rows)} auctions...")
+    context = _FeatureBatchContext(context_rows)
 
     # Build features row by row. The live path intentionally uses only completed-sale
     # sources for real auctions, while demo rows can fall back to demo history.
     records = []
     for auction in rows:
         try:
-            f = compute_features_single(auction)
+            f = compute_features_single(auction, batch_context=context)
             f["auction_id"] = auction["auction_id"]
             records.append(f)
         except Exception as e:
