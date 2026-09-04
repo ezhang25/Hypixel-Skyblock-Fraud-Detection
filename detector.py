@@ -237,6 +237,33 @@ class ModelBundle:
             "combined_score": combined,
         }
 
+    def score_batch(self, feature_frame) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+        """Score an entire feature matrix at once for fast historical rescoring."""
+        if not self.is_ready():
+            raise RuntimeError("No Isolation Forest model is loaded")
+
+        cols = self.meta.get("features", FEATURE_COLUMNS)
+        x_vals = feature_frame.reindex(columns=cols, fill_value=0.0).to_numpy(dtype=float)
+        x_vals = np.nan_to_num(x_vals, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.scaler:
+            x_vals = self.scaler.transform(x_vals)
+
+        raw_scores = -self.if_model.score_samples(x_vals)
+        score_min = self.meta.get("score_min", 0.35)
+        score_max = self.meta.get("score_max", 0.80)
+        anomaly_scores = np.clip(
+            (raw_scores - score_min) / max(score_max - score_min, 1e-6),
+            0,
+            1,
+        )
+        fraud_probs = None
+        if self.lgbm_model is not None:
+            fraud_probs = self.lgbm_model.predict_proba(x_vals)[:, 1]
+            combined_scores = 0.3 * anomaly_scores + 0.7 * fraud_probs
+        else:
+            combined_scores = anomaly_scores
+        return anomaly_scores, fraud_probs, combined_scores
+
 
 # ── Flagging logic ─────────────────────────────────────────────────────────────
 
@@ -290,7 +317,12 @@ def _build_reasons(features: dict, scores: dict) -> list[str]:
     return reasons or ["Pattern matches known IRL trading signals"]
 
 
-def _score_features(auction: dict, features: dict, bundle: ModelBundle) -> dict | None:
+def _score_features(
+    auction: dict,
+    features: dict,
+    bundle: ModelBundle,
+    scores: dict | None = None,
+) -> dict | None:
     """Apply model and evidence gates to an already-computed feature record."""
     # Hard price floor — if price is within normal range, skip entirely
     pmr = features.get("price_to_median_ratio", -1)
@@ -306,7 +338,7 @@ def _score_features(auction: dict, features: dict, bundle: ModelBundle) -> dict 
         )
         return None
 
-    scores   = bundle.score(features)
+    scores = scores or bundle.score(features)
     combined = scores.get("combined_score")
 
     if combined is None:
@@ -368,13 +400,19 @@ def score_all_existing(bundle: ModelBundle) -> None:
             ).fetchall()
         }
 
+    anomaly_scores, fraud_probs, combined_scores = bundle.score_batch(feature_frame)
     cleared = reset_flagged_queue()
     logger.info("Cleared %s stale flagged rows before full rescore", cleared)
     logger.info("Scoring %s existing auctions...", len(feature_frame))
     flagged = 0
-    for auction_id, feature_row in feature_frame.iterrows():
+    for row_index, (auction_id, feature_row) in enumerate(feature_frame.iterrows()):
         auction = rows[auction_id]
-        flag = _score_features(auction, feature_row.to_dict(), bundle)
+        scores = {
+            "anomaly_score": float(anomaly_scores[row_index]),
+            "fraud_prob": float(fraud_probs[row_index]) if fraud_probs is not None else None,
+            "combined_score": float(combined_scores[row_index]),
+        }
+        flag = _score_features(auction, feature_row.to_dict(), bundle, scores=scores)
         if flag:
             insert_flag(flag)
             flagged += 1
