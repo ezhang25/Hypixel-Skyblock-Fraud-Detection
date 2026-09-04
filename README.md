@@ -130,7 +130,7 @@ Once you have at least 30 labeled examples, you can optionally train the supervi
 ## How it works
 
 1. **Collector** polls `/v2/skyblock/auctions/ended` and `/v2/skyblock/auctions` every 60s
-2. **Features** computes price ratios, bid patterns, seller history signals per auction
+2. **Features** computes price ratios, bid patterns, and buyer--seller pair signals per auction
 3. **Isolation Forest** flags statistical outliers unsupervised (no labels needed to start)
 4. **LightGBM** classifier takes over once you manually label flagged cases
 5. **Dashboard** shows flagged auctions with explainability — why each was flagged

@@ -113,14 +113,13 @@ def _passes_strict_evidence_gate(features: dict, scores: dict) -> tuple[bool, st
     has_item = features.get("has_item_median") == 1.0
     repeat_pair = features.get("repeat_pair") == 1.0
     very_fast = features.get("very_fast_sale") == 1.0
-    seller_outlier = features.get("price_to_seller_avg_ratio", 1.0) >= 8.0
     anomaly_score = scores.get("anomaly_score") or 0.0
     fraud_prob = scores.get("fraud_prob")
 
     if has_quality and pqmr >= 3.0:
         return True, None
 
-    if has_item and pmr >= 8.0 and (very_fast or repeat_pair or seller_outlier):
+    if has_item and pmr >= 8.0 and (very_fast or repeat_pair):
         return True, None
 
     if fraud_prob is not None and fraud_prob >= 0.90 and has_item and pmr >= PRICE_RATIO_HARD_FLOOR:
@@ -277,10 +276,6 @@ def _build_reasons(features: dict, scores: dict) -> list[str]:
     if features.get("repeat_pair") == 1.0:
         count = int(features.get("seller_buyer_pair_count_30d", 0))
         reasons.append(f"Seller and buyer have transacted {count}× in 30 days")
-
-    psar = features.get("price_to_seller_avg_ratio", -1)
-    if psar > 5:
-        reasons.append(f"Price is {psar:.1f}× this seller's 30-day average")
 
     quality_score = features.get("item_quality_score", 0.0)
     if quality_score >= 0.45:

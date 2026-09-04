@@ -7,9 +7,8 @@ high-value sales from artificially inflated IRL trades.
 Feature groups:
   1. Price signals       — how far above market value is the price?
   2. Auction mechanics   — bid patterns, BIN vs auction, speed of sale
-  3. Seller history      — is this seller's behaviour unusual?
-  4. Pair signals        — how often does this exact seller/buyer pair transact?
-  5. Item context        — rarity tier, category normalisation
+  3. Pair signals        — how often does this exact seller/buyer pair transact?
+  4. Item context        — rarity tier, category normalisation
 """
 
 import json
@@ -35,7 +34,6 @@ import pandas as pd
 from config import MEDIAN_WINDOW_DAYS, MIN_SALES_FOR_MEDIAN
 from database import (
     get_item_price_history,
-    get_seller_history,
     get_pair_frequency,
     get_conn,
 )
@@ -116,7 +114,6 @@ class _FeatureBatchContext:
         seller_cutoff = now_ms - 30 * 86_400_000
         item_entries: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
         quality_entries: dict[tuple[str, tuple], list[tuple[str, float]]] = defaultdict(list)
-        seller_entries: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
         pair_entries: Counter[tuple[str, str]] = Counter()
 
         for row in rows:
@@ -134,12 +131,6 @@ class _FeatureBatchContext:
                         item_entries[(mode, item_key)].append((auction_id, unit_price))
                         quality_entries[(mode, signature)].append((auction_id, unit_price))
 
-            if ended_at >= seller_cutoff and modes:
-                seller = row.get("seller_uuid")
-                if seller:
-                    for mode in modes:
-                        seller_entries[(mode, seller)].append((auction_id, float(row["final_price"])))
-
             buyer = row.get("buyer_uuid")
             seller = row.get("seller_uuid")
             if ended_at >= seller_cutoff and buyer and seller:
@@ -147,7 +138,6 @@ class _FeatureBatchContext:
 
         self.item_groups = {key: _ValueGroup(entries) for key, entries in item_entries.items()}
         self.quality_groups = {key: _ValueGroup(entries) for key, entries in quality_entries.items()}
-        self.seller_groups = {key: _ValueGroup(entries) for key, entries in seller_entries.items()}
         self.pair_counts = pair_entries
 
     @staticmethod
@@ -163,10 +153,6 @@ class _FeatureBatchContext:
         item_stats = item_group.stats_without(auction_id) if item_group else (0, None, None)
         quality_stats = quality_group.stats_without(auction_id) if quality_group else (0, None, None)
         return (*item_stats, *quality_stats)
-
-    def seller_stats(self, auction: dict) -> tuple[int, float | None, float | None]:
-        group = self.seller_groups.get((self._mode(auction), auction.get("seller_uuid")))
-        return group.stats_without(auction["auction_id"]) if group else (0, None, None)
 
     def pair_count(self, auction: dict) -> int:
         buyer = auction.get("buyer_uuid") or ""
@@ -476,34 +462,7 @@ def compute_features_single(auction: dict, batch_context: _FeatureBatchContext |
         features["log_time_to_sell"]  = -1.0
         features["very_fast_sale"]    = 0.0
 
-    # ── 3. Seller history ──────────────────────────────────────────────────────
-    if batch_context is not None:
-        seller_count, seller_median, seller_stdev = batch_context.seller_stats(auction)
-    else:
-        seller_hist = get_seller_history(seller_uuid, days=30, allowed_sources=history_sources)
-        seller_prices = [h["final_price"] for h in seller_hist if h["auction_id"] != auction_id]
-        seller_count = len(seller_prices)
-        seller_median = _safe_median(seller_prices)
-        seller_stdev = _safe_stdev(seller_prices)
-
-    if seller_count < MIN_SALES_FOR_MEDIAN:
-        seller_median = None
-
-    features["seller_sale_count_30d"] = float(seller_count)
-
-    if seller_median and seller_median > 0:
-        features["price_to_seller_avg_ratio"] = final_price / seller_median
-        features["has_seller_history"]        = 1.0
-    else:
-        features["price_to_seller_avg_ratio"] = 1.0
-        features["has_seller_history"]        = 0.0
-
-    if seller_median and seller_stdev and seller_stdev > 0:
-        features["seller_price_zscore"] = (final_price - seller_median) / seller_stdev
-    else:
-        features["seller_price_zscore"] = 0.0
-
-    # ── 4. Pair signals ────────────────────────────────────────────────────────
+    # ── 3. Pair signals ────────────────────────────────────────────────────────
     if buyer_uuid:
         pair_count = batch_context.pair_count(auction) if batch_context is not None else get_pair_frequency(seller_uuid, buyer_uuid, days=30)
         features["seller_buyer_pair_count_30d"] = float(pair_count)
@@ -513,7 +472,7 @@ def compute_features_single(auction: dict, batch_context: _FeatureBatchContext |
         features["seller_buyer_pair_count_30d"] = 0.0
         features["repeat_pair"]                 = 0.0
 
-    # ── 5. Item context ────────────────────────────────────────────────────────
+    # ── 4. Item context ────────────────────────────────────────────────────────
     features["tier_weight"]     = tier_weight
     features["log_final_price"] = float(np.log1p(final_price))
 
@@ -548,11 +507,6 @@ def _heuristic_score(f: dict) -> float:
 
     # Same pair repeating
     add(0.15, f.get("repeat_pair", 0) == 1)
-
-    # Seller's price way above their own norm
-    psar = f.get("price_to_seller_avg_ratio", -1)
-    if psar > 0:
-        add(0.05, psar > 5)
 
     return score / weight_total if weight_total > 0 else 0.0
 
@@ -632,10 +586,6 @@ FEATURE_COLUMNS = [
     "time_to_sell_s",
     "log_time_to_sell",
     "very_fast_sale",
-    "seller_sale_count_30d",
-    "price_to_seller_avg_ratio",
-    "has_seller_history",
-    "seller_price_zscore",
     "seller_buyer_pair_count_30d",
     "repeat_pair",
     "tier_weight",
